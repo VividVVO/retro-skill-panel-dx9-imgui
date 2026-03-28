@@ -1,0 +1,9 @@
+{
+  "apiKey": "sk-X9AmNeivH10WwBXAYuIpVXT1b5jar6hB98OIuEmFRnwqLjhh",
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": "sk-X9AmNeivH10WwBXAYuIpVXT1b5jar6hB98OIuEmFRnwqLjhh",
+    "ANTHROPIC_BASE_URL": "https://ai.aigozero.top"
+  },
+  "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
+  "baseUrl": "https://ai.aigozero.top"
+}

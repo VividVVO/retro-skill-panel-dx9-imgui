@@ -1,0 +1,56 @@
+# Build outputs
+build/
+bin/
+bin64/
+x64/
+x86/
+Debug/
+Release/
+out/
+
+# Visual Studio / MSVC
+.vs/
+*.obj
+*.o
+*.ilk
+*.idb
+*.pdb
+*.pch
+*.ipch
+*.aps
+*.ncb
+*.sdf
+*.suo
+*.user
+*.VC.db
+*.VC.opendb
+*.tlog
+*.lastbuildstate
+
+# DLL / EXE outputs
+*.exe
+*.dll
+*.lib
+*.exp
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# VSCode
+.vscode/
+
+# Logs / temp
+*.log
+*.tmp
+*.cache
+*.bak
+
+# Python cache
+__pycache__/
+*.pyc
+
+# ImGui ini
+imgui.ini
