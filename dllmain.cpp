@@ -24,9 +24,13 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
 // [全局配置与内存地址]
 // ============================================================================
 uintptr_t g_BaseAddr = 0;
-const uintptr_t OFF_BASE = 0x00B61A68;
-std::vector<uintptr_t> G_OFFSETS_X = { 0x18, 0x30, 0x40, 0x24, 0x18, 0x24, 0x1C };
-std::vector<uintptr_t> G_OFFSETS_Y = { 0x18, 0x30, 0x40, 0x24, 0x18, 0x24, 0x20 };
+
+// 改为：MapleStory.exe + 0x00B6A0C0
+const uintptr_t OFF_BASE = 0x00B6A0C0;
+
+// 最终确认：X / Y 共用同一条链，只是最后分别取 +0x1C / +0x20
+std::vector<uintptr_t> G_OFFSETS_X = { 0x18, 0x40, 0x24, 0x18, 0x24, 0x1C };
+std::vector<uintptr_t> G_OFFSETS_Y = { 0x18, 0x40, 0x24, 0x18, 0x24, 0x20 };
 
 HWND g_GameHwnd = nullptr;
 WNDPROC g_OriginalWndProc = nullptr;
@@ -43,6 +47,96 @@ float                   g_mainScale = 1.0f;
 // 贴图资源 (使用 Managed 内存池以提升稳定性)
 IDirect3DTexture9 *g_texBtnNormal = nullptr, *g_texBtnHover = nullptr, *g_texBtnPressed = nullptr, *g_texBtnDisabled = nullptr;
 int g_btnW = 0, g_btnH = 0;
+
+// ============================================================================
+// [SkillWnd 子控件Hook - 第一步]
+// ============================================================================
+
+// 添加文件日志函数
+void WriteLogFile(const char* message)
+{
+    FILE* f = fopen("C:\\skillwnd_hook_log.txt", "a");
+    if (f)
+    {
+        fprintf(f, "%s\n", message);
+        fclose(f);
+    }
+}
+
+// SkillWnd 子控件总装函数的Hook
+typedef void (__thiscall *tSkillWndInitChildren)(uintptr_t thisptr);
+tSkillWndInitChildren oSkillWndInitChildren = nullptr;
+
+constexpr size_t kInlineHookJumpSize = 5;
+
+size_t GetX86InstructionLength(const BYTE* code)
+{
+    switch (code[0])
+    {
+    case 0x50: case 0x51: case 0x52: case 0x53:
+    case 0x55: case 0x56: case 0x57:
+    case 0x58: case 0x59: case 0x5A: case 0x5B:
+    case 0x5D: case 0x5E: case 0x5F:
+    case 0xCC:  // INT3 - breakpoint (1 byte)
+        return 1;
+
+    case 0x6A:
+    case 0xEB:
+        return 2;
+
+    case 0x33:
+        return 2;
+
+    case 0x68:
+    case 0xA1:
+    case 0xE8:
+    case 0xE9:
+        return 5;
+
+    case 0x64:
+        if (code[1] == 0xA1)
+            return 6;
+        break;
+
+    case 0x81:
+        return 6;
+
+    case 0x83:
+        return 3;
+
+    case 0x8B:
+        if (code[1] == 0xEC || code[1] == 0xFF)
+            return 2;
+        if (code[1] == 0x45 || code[1] == 0x4D || code[1] == 0x55)
+            return 3;
+        break;
+    }
+
+    return 0;
+}
+
+size_t CalculateRelocatedByteCount(const BYTE* code, size_t minimumBytes)
+{
+    size_t total = 0;
+    while (total < minimumBytes)
+    {
+        size_t instructionLength = GetX86InstructionLength(code + total);
+        if (instructionLength == 0)
+            return 0;
+
+        total += instructionLength;
+    }
+
+    return total;
+}
+
+// 子控件构造函数（sub_48CD30）
+typedef void* (__thiscall *tChildConstructor)(uintptr_t thisptr);
+tChildConstructor oChildConstructor = nullptr;
+
+// 子控件初始化函数（sub_50A6A0）
+typedef void (__thiscall *tChildInitializer)(uintptr_t child, uintptr_t parent, int id, int x, int y, int flags, int region, int a8);
+tChildInitializer oChildInitializer = nullptr;
 
 // ============================================================================
 // [工具函数] 独立的图片转 D3D 纹理加载器
@@ -81,13 +175,35 @@ bool LoadManagedTextureFromFile(IDirect3DDevice9* device, const char* filename, 
 }
 
 // ============================================================================
-// [核心逻辑] 安全解析多级指针
+// [工具函数] 安全的内存读取检查（替代 SafeIsBadReadPtr）
+// ============================================================================
+bool SafeIsBadReadPtr(void* ptr, size_t size)
+{
+    __try
+    {
+        volatile char* p = (volatile char*)ptr;
+        for (size_t i = 0; i < size; i++)
+        {
+            volatile char c = p[i];  // 触发实际的内存访问
+            (void)c;
+        }
+        return false;  // 成功读取，地址有效
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER)
+    {
+        return true;  // 访问违例，地址无效
+    }
+}
+
+// ============================================================================
+// [核心逻辑] 安全解析多级指针（使用 SEH 保护）
 // ============================================================================
 uintptr_t ResolvePtrChain(uintptr_t base, std::vector<uintptr_t> offsets) {
     uintptr_t addr = base;
     for (uintptr_t off : offsets) {
         if (addr == 0) return 0;
-        if (IsBadReadPtr((void*)addr, sizeof(uintptr_t))) return 0;
+
+        if (SafeIsBadReadPtr((void*)addr, sizeof(uintptr_t))) return 0;
         addr = *(uintptr_t*)addr;
         if (addr == 0) return 0;
         addr += off;
@@ -243,6 +359,208 @@ void *SmartSafeHook(DWORD targetFunc, void *myFunc)
 }
 
 // ============================================================================
+// [SkillWnd 子控件初始化Hook函数]
+// ============================================================================
+
+// Hook 函数 - 使用 __fastcall，thisptr 在 ECX 中
+// 原 __thiscall 函数 thisptr 也在 ECX，所以可以直接兼容
+void __fastcall hkSkillWndInitChildren(uintptr_t thisptr)
+{
+    static int callCount = 0;
+    callCount++;
+
+    char debugBuf[256];
+    sprintf_s(debugBuf, "[Hook #%d] sub_9E17D0 called, thisptr: 0x%p", callCount, (void*)thisptr);
+    WriteLogFile(debugBuf);
+    OutputDebugStringA(debugBuf);
+
+    // 验证 thisptr
+    if (SafeIsBadReadPtr((void*)thisptr, 4))
+    {
+        WriteLogFile("[Hook] WARNING: thisptr is invalid!");
+        // 即使 thisptr 无效，仍然调用原函数让游戏处理
+        if (oSkillWndInitChildren)
+            oSkillWndInitChildren(thisptr);
+        return;
+    }
+
+    uintptr_t vtable = *(uintptr_t*)thisptr;
+    uintptr_t expectedVTable = 0x00E75130;  // SkillWnd 虚表
+
+    sprintf_s(debugBuf, "  vtable: 0x%p (expected: 0x%p)", (void*)vtable, (void*)expectedVTable);
+    WriteLogFile(debugBuf);
+
+    if (vtable == expectedVTable)
+    {
+        WriteLogFile("  OK: VTable match - This is SkillWnd object!");
+    }
+    else
+    {
+        WriteLogFile("  WARNING: VTable mismatch");
+    }
+
+    // 调用原函数
+    if (oSkillWndInitChildren)
+        oSkillWndInitChildren(thisptr);
+}
+
+// ============================================================================
+// [Hook 安装函数]
+// ============================================================================
+
+bool SetupSkillWndChildHook()
+{
+    WriteLogFile("=== SetupSkillWndChildHook Started ===");
+
+    char debugBuf[512];
+
+    // Direct address - no base offset needed
+    BYTE* pTarget = (BYTE*)0x009E17D0;
+
+    sprintf_s(debugBuf, "[Hook] Target function address: 0x%p", pTarget);
+    WriteLogFile(debugBuf);
+    OutputDebugStringA(debugBuf);
+
+    // Read first 16 bytes for debugging
+    sprintf_s(debugBuf, "[Hook] First 16 bytes: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
+        pTarget[0], pTarget[1], pTarget[2], pTarget[3], pTarget[4],
+        pTarget[5], pTarget[6], pTarget[7], pTarget[8],
+        pTarget[9], pTarget[10], pTarget[11], pTarget[12],
+        pTarget[13], pTarget[14], pTarget[15]);
+    WriteLogFile(debugBuf);
+    OutputDebugStringA(debugBuf);
+
+    // Check if address is valid
+    if (SafeIsBadReadPtr(pTarget, 16))
+    {
+        WriteLogFile("[Hook] ERROR: Target address is not readable!");
+        OutputDebugStringA("[Hook] ERROR: Target address is not readable!\n");
+        return false;
+    }
+
+    // Check if it looks like valid code
+    if (pTarget[0] == 0x00 && pTarget[1] == 0x00)
+    {
+        WriteLogFile("[Hook] ERROR: Target address contains only zeros!");
+        OutputDebugStringA("[Hook] ERROR: Target address contains only zeros!\n");
+        return false;
+    }
+
+    // ============================================================================
+    // Follow any JMP instructions
+    // ============================================================================
+    BYTE* pOriginal = pTarget;
+    while (pTarget[0] == 0xE9 || pTarget[0] == 0xEB)
+    {
+        if (pTarget[0] == 0xE9)
+        {
+            pTarget = pTarget + 5 + *(int32_t*)(pTarget + 1);
+            sprintf_s(debugBuf, "[Hook] Followed JMP to: 0x%p", pTarget);
+            WriteLogFile(debugBuf);
+        }
+        else
+        {
+            pTarget = pTarget + 2 + *(int8_t*)(pTarget + 1);
+        }
+    }
+
+    if (pTarget != pOriginal)
+    {
+        sprintf_s(debugBuf, "[Hook] Final target after JMP: 0x%p", pTarget);
+        WriteLogFile(debugBuf);
+
+        sprintf_s(debugBuf, "[Hook] Bytes at final target: %02X %02X %02X %02X %02X",
+            pTarget[0], pTarget[1], pTarget[2], pTarget[3], pTarget[4]);
+        WriteLogFile(debugBuf);
+    }
+
+    // ============================================================================
+    // Create trampoline
+    // ============================================================================
+    size_t relocatedBytes = CalculateRelocatedByteCount(pTarget, kInlineHookJumpSize);
+    if (relocatedBytes == 0)
+    {
+        sprintf_s(debugBuf, "[Hook] ERROR: Unsupported prologue bytes at 0x%p", pTarget);
+        WriteLogFile(debugBuf);
+        return false;
+    }
+
+    sprintf_s(debugBuf, "[Hook] Relocating %zu bytes into trampoline", relocatedBytes);
+    WriteLogFile(debugBuf);
+
+    void* trampoline = VirtualAlloc(NULL, relocatedBytes + kInlineHookJumpSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!trampoline)
+    {
+        WriteLogFile("[Hook] ERROR: VirtualAlloc failed!");
+        return false;
+    }
+
+    // Copy original bytes
+    memcpy(trampoline, pTarget, relocatedBytes);
+    oSkillWndInitChildren = (tSkillWndInitChildren)trampoline;
+
+    // Add jump back
+    BYTE* pTramp = (BYTE*)trampoline + relocatedBytes;
+    pTramp[0] = 0xE9;
+    *(int32_t*)(pTramp + 1) = (int32_t)((uintptr_t)pTarget + relocatedBytes - ((uintptr_t)pTramp + kInlineHookJumpSize));
+
+    sprintf_s(debugBuf, "[Hook] Trampoline at: 0x%p", trampoline);
+    WriteLogFile(debugBuf);
+
+    // ============================================================================
+    // Install hook
+    // ============================================================================
+    DWORD oldProtect;
+    if (!VirtualProtect(pTarget, 5, PAGE_EXECUTE_READWRITE, &oldProtect))
+    {
+        sprintf_s(debugBuf, "[Hook] ERROR: VirtualProtect failed! Error: %d", GetLastError());
+        WriteLogFile(debugBuf);
+        VirtualFree(trampoline, 0, MEM_RELEASE);
+        return false;
+    }
+
+    BYTE hook[5];
+    hook[0] = 0xE9;
+    int32_t offset = (int32_t)((uintptr_t)hkSkillWndInitChildren - (uintptr_t)pTarget - 5);
+    memcpy(hook + 1, &offset, 4);
+
+    sprintf_s(debugBuf, "[Hook] Writing JMP: offset=%d (0x%X)", offset, offset);
+    WriteLogFile(debugBuf);
+
+    memcpy(pTarget, hook, 5);
+
+    sprintf_s(debugBuf, "[Hook] After write: %02X %02X %02X %02X %02X",
+        pTarget[0], pTarget[1], pTarget[2], pTarget[3], pTarget[4]);
+    WriteLogFile(debugBuf);
+
+    VirtualProtect(pTarget, 5, oldProtect, &oldProtect);
+    FlushInstructionCache(GetCurrentProcess(), pTarget, 5);
+
+    // Save child function addresses (using direct addresses)
+    oChildConstructor = (tChildConstructor)0x0048CD30;
+    oChildInitializer = (tChildInitializer)0x0050A6A0;
+
+    sprintf_s(debugBuf, "[Hook] Child constructor: 0x%p", (void*)0x0048CD30);
+    WriteLogFile(debugBuf);
+
+    sprintf_s(debugBuf, "[Hook] Child initializer: 0x%p", (void*)0x0050A6A0);
+    WriteLogFile(debugBuf);
+
+    if (pTarget[0] == 0xE9)
+    {
+        WriteLogFile("[Hook] OK: Hook installed successfully!");
+        OutputDebugStringA("[Hook] OK: Hook installed!\n");
+        return true;
+    }
+    else
+    {
+        WriteLogFile("[Hook] ERROR: Hook verification failed!");
+        OutputDebugStringA("[Hook] ERROR: Hook verification failed!\n");
+        return false;
+    }
+}
+
+// ============================================================================
 // [内部渲染核心]
 // ============================================================================
 typedef HRESULT(APIENTRY *tPresent)(IDirect3DDevice9 *pDevice, const RECT *, const RECT *, HWND, const RGNDATA *);
@@ -340,16 +658,25 @@ HRESULT APIENTRY hkPresent(IDirect3DDevice9 *pDevice, const RECT *pSourceRect, c
             int gameUiX = 0, gameUiY = 0;
             bool gameUiVisible = false;
 
-            if (g_BaseAddr != 0 && OFF_BASE != 0) {
-                uintptr_t baseVal = *(uintptr_t*)(g_BaseAddr + OFF_BASE);
-                if (baseVal != 0) {
-                    uintptr_t xAddr = ResolvePtrChain(g_BaseAddr + OFF_BASE, G_OFFSETS_X);
-                    uintptr_t yAddr = ResolvePtrChain(g_BaseAddr + OFF_BASE, G_OFFSETS_Y);
-                    
-                    if (xAddr && yAddr) {
-                        gameUiX = *(int*)xAddr;
-                        gameUiY = *(int*)yAddr;
-                        gameUiVisible = true; // 成功解析到最后，认为窗体是打开状态
+            if (g_BaseAddr != 0 && OFF_BASE != 0)
+            {
+                uintptr_t rootPtrAddr = g_BaseAddr + OFF_BASE;
+                if (!SafeIsBadReadPtr((void*)rootPtrAddr, sizeof(uintptr_t)))
+                {
+                    uintptr_t rootPtr = *(uintptr_t*)rootPtrAddr;
+                    if (rootPtr != 0)
+                    {
+                        uintptr_t xAddr = ResolvePtrChain(rootPtrAddr, G_OFFSETS_X);
+                        uintptr_t yAddr = ResolvePtrChain(rootPtrAddr, G_OFFSETS_Y);
+
+                        if (xAddr && yAddr &&
+                            !SafeIsBadReadPtr((void*)xAddr, sizeof(int)) &&
+                            !SafeIsBadReadPtr((void*)yAddr, sizeof(int)))
+                        {
+                            gameUiX = *(int*)xAddr;
+                            gameUiY = *(int*)yAddr;
+                            gameUiVisible = true; // 成功解析到技能栏坐标，认为窗体可见
+                        }
                     }
                 }
             }
@@ -362,8 +689,12 @@ HRESULT APIENTRY hkPresent(IDirect3DDevice9 *pDevice, const RECT *pSourceRect, c
                 // ========================================================================
                 // 【1. 绘制独立的超级技能展开/收缩按钮】(自动内存吸附)
                 // ========================================================================
-                ImVec2 btnPos((float)gameUiX + 11, (float)gameUiY + 256);
-                ImGui::SetNextWindowPos(btnPos);
+                const float kBtnOffsetX   = 11.0f;   // 超级按钮相对技能栏左上角 X
+                const float kBtnOffsetY   = 256.0f;  // 超级按钮相对技能栏左上角 Y
+                const float kPanelGapLeft = 0.0f;    // 超级技能栏与原技能栏左边间距
+
+                ImVec2 btnPos((float)gameUiX + kBtnOffsetX, (float)gameUiY + kBtnOffsetY);
+                ImGui::SetNextWindowPos(btnPos, ImGuiCond_Always);
                 ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
                 ImGui::Begin("SuperSkillToggleButton", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoMove);
 
@@ -379,11 +710,8 @@ HRESULT APIENTRY hkPresent(IDirect3DDevice9 *pDevice, const RECT *pSourceRect, c
                 }
 
                 IDirect3DTexture9* tex = g_texBtnNormal;
-                if (g_ExpandPanel) tex = g_texBtnPressed;
-                else {
-                    if (is_held) tex = g_texBtnPressed;
-                    else if (is_hovered) tex = g_texBtnHover;
-                }
+                if (is_held) tex = g_texBtnPressed;
+                else if (is_hovered) tex = g_texBtnHover;
 
                 if (tex) ImGui::GetWindowDrawList()->AddImage((ImTextureID)tex, btnPos, ImVec2(btnPos.x + size.x, btnPos.y + size.y));
                 else ImGui::GetWindowDrawList()->AddRectFilled(btnPos, ImVec2(btnPos.x + size.x, btnPos.y + size.y), IM_COL32(255, 0, 0, 100));
@@ -396,8 +724,9 @@ HRESULT APIENTRY hkPresent(IDirect3DDevice9 *pDevice, const RECT *pSourceRect, c
                 // ========================================================================
                 if (g_ExpandPanel)
                 {
-                    float panelWidth = 174.0f * g_mainScale; 
-                    ImGui::SetNextWindowPos(ImVec2((float)gameUiX - panelWidth - 5, (float)gameUiY));
+                    float panelWidth = 174.0f * g_mainScale;
+                    ImVec2 panelPos((float)gameUiX - panelWidth - kPanelGapLeft, (float)gameUiY);
+                    ImGui::SetNextWindowPos(panelPos, ImGuiCond_Always);
                     RenderRetroSkillPanel(g_retroState, g_retroAssets, pDevice, g_mainScale, &g_behaviorHooks);
                 }
             }
@@ -507,9 +836,50 @@ bool SetupInternalD3D9Hook()
 // ============================================================================
 // [主线程控制]
 // ============================================================================
+
+// 热键测试Hook - 按F10触发测试函数调用
+void TestHookCall()
+{
+    WriteLogFile("=== MANUAL TEST: Triggering hook test ===");
+    OutputDebugStringA("=== MANUAL TEST: Triggering hook test ===\n");
+
+    // 尝试手动调用原函数（如果Hook正确，会先触发我们的Hook）
+    if (oSkillWndInitChildren)
+    {
+        WriteLogFile("[Test] Calling original function via trampoline...");
+        // 创建一个假的this指针来测试
+        // 0x00E75130 是虚表绝对地址，不需要加baseAddr
+        uintptr_t fakeThis = 0x00E75130;
+
+        char debugBuf[256];
+        sprintf_s(debugBuf, "[Test] Calling with fake thisptr: 0x%p", (void*)fakeThis);
+        WriteLogFile(debugBuf);
+
+        // 注意：这可能会崩溃，因为我们没有真正的SkillWnd对象
+        // 但如果Hook正确，至少我们的hook函数应该被调用
+        __try
+        {
+            oSkillWndInitChildren(fakeThis);
+            WriteLogFile("[Test] Function call returned (unexpected but good)");
+        }
+        __except(EXCEPTION_EXECUTE_HANDLER)
+        {
+            WriteLogFile("[Test] Function call caused exception (expected for fake thisptr)");
+        }
+    }
+    else
+    {
+        WriteLogFile("[Test] ERROR: oSkillWndInitChildren is NULL!");
+    }
+}
+
 DWORD WINAPI MainControlThread(LPVOID lpParam)
 {
     Sleep(3000);
+
+    // Clear old log file
+    FILE* f = fopen("C:\\skillwnd_hook_log.txt", "w");
+    if (f) fclose(f);
 
     g_BaseAddr = (uintptr_t)GetModuleHandleA(NULL);
 
@@ -521,11 +891,38 @@ DWORD WINAPI MainControlThread(LPVOID lpParam)
 
     SetupInternalD3D9Hook();
 
+    // ========== Setup SkillWnd Child Hook ==========
+    OutputDebugStringA("==================================================\n");
+    OutputDebugStringA("[Main] Setting up SkillWnd child hook...\n");
+    OutputDebugStringA("==================================================\n");
+
+    bool hookSuccess = SetupSkillWndChildHook();
+
+    if (hookSuccess)
+    {
+        OutputDebugStringA("[Main] OK: SkillWnd child hook setup completed\n");
+    }
+    else
+    {
+        OutputDebugStringA("[Main] FAILED: SkillWnd child hook setup failed\n");
+    }
+    OutputDebugStringA("==================================================\n");
+    // ================================================
+
+    WriteLogFile("=== Hook setup completed, waiting for game calls ===");
+
     return 0;
 }
 
 void UnhookAndCleanup()
 {
+    // 清理SkillWnd Hook
+    if (oSkillWndInitChildren)
+    {
+        OutputDebugStringA("[Cleanup] Removing SkillWnd child hook...\n");
+        oSkillWndInitChildren = nullptr;
+    }
+
     if (g_GameHwnd && g_OriginalWndProc)
     {
         SetWindowLongPtrA(g_GameHwnd, GWL_WNDPROC, (LONG_PTR)g_OriginalWndProc);

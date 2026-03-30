@@ -80,7 +80,6 @@ void RenderRetroSkillPanel(RetroSkillRuntimeState& state, RetroSkillAssets& asse
         state.lastAcceptedClickTime = ImGui::GetTime();
     };
 
-    ImGui::SetNextWindowPos(ImVec2(10.0f * mainScale, 10.0f * mainScale), ImGuiCond_Once);
     ImGui::SetNextWindowSize(ImVec2(m.width, m.height), ImGuiCond_Always);
 
     ImGuiWindowFlags flags =

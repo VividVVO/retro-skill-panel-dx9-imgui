@@ -1,9 +1,11 @@
 {
-  "apiKey": "sk-X9AmNeivH10WwBXAYuIpVXT1b5jar6hB98OIuEmFRnwqLjhh",
+  "apiKey": "sk-ant-oat01-0ij2qBYtC3ZzngXkMdZqgzdihMDSEpx6",
   "env": {
-    "ANTHROPIC_AUTH_TOKEN": "sk-X9AmNeivH10WwBXAYuIpVXT1b5jar6hB98OIuEmFRnwqLjhh",
-    "ANTHROPIC_BASE_URL": "https://ai.aigozero.top"
+    "ANTHROPIC_AUTH_TOKEN": "sk-ant-oat01-0ij2qBYtC3ZzngXkMdZqgzdihMDSEpx6",
+    "ANTHROPIC_BASE_URL": "https://chat.nuoda.vip/claudecode"
   },
   "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
-  "baseUrl": "https://ai.aigozero.top"
+  "baseUrl": "https://chat.nuoda.vip/claudecode",
+  
+ "model": "opus"
 }

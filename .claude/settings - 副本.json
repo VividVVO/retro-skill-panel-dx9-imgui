@@ -1,0 +1,11 @@
+{
+  "apiKey": "ssk-61cw87eZ8v828rkY2mrsXB0DCFtCaHnmN6EurOi0mAGgX1pL",
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": "sk-61cw87eZ8v828rkY2mrsXB0DCFtCaHnmN6EurOi0mAGgX1pL",
+    "ANTHROPIC_BASE_URL": "https://ai.aigozero.top"
+  },
+  "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
+  "baseUrl": "https://ai.aigozero.top",
+  
+ "model": "opus"
+}
